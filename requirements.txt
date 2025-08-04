@@ -2,3 +2,4 @@ xai-sdk
 pyyaml
 beautifulsoup4
 requests
+gradio

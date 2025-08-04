@@ -209,4 +209,5 @@ __marimo__/
 
 # Custom
 prompt.md
-output/*
+output
+debug
