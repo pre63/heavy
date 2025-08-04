@@ -5,11 +5,14 @@ from datetime import datetime
 from xai_sdk import Client
 from xai_sdk.chat import system, user
 
-XAI_API_KEY = None
+# Get API key from environment
+XAI_API_KEY = os.getenv("XAI_API_KEY")
+if not XAI_API_KEY:
+  raise ValueError("XAI_API_KEY not set in environment")
 
 
 def grok_chat(messages, model, temperature=0.7):
-
+  """Helper function to interact with Grok via xAI SDK"""
   client = Client(api_key=XAI_API_KEY)
   chat = client.chat.create(model=model, temperature=temperature)
 
@@ -35,45 +38,36 @@ def run_agent(main_prompt, agent_id, model):
   return grok_chat(messages, model=model)
 
 
-def select_by_voting(responses, main_prompt, model, num_voters=None):
-  """Have voters select the best response via voting"""
-  n = len(responses)
-  if num_voters is None:
-    num_voters = n  # One vote per agent
+def vote_on_aspects(responses, main_prompt, model):
+  """Send responses to Grok for qualitative voting on all aspects"""
+  combined = "\n\n".join([f"Response {i+1}:\n{r}" for i, r in enumerate(responses)])
+  messages = [
+    {
+      "role": "system",
+      "content": """You are a qualitative evaluator. First, identify the key aspects (main sections, topics, or elements) covered in the responses. 
+For each aspect, evaluate the content from all responses qualitatively based on accuracy, depth, clarity, and relevance. 
+Select the best content for each aspect (which may combine elements from multiple responses if beneficial, but prefer the strongest single source).
+Output a structured response with each aspect as a heading, followed by the selected best content.
+Finally, provide a brief rationale for your selections.""",
+    },
+    {"role": "user", "content": f"Original prompt: {main_prompt}\n\nResponses:\n{combined}"},
+  ]
+  return grok_chat(messages, model=model)
 
-  votes = [0] * n
 
-  for _ in range(num_voters):
-    combined = "\n\n".join([f"Candidate {i+1} response:\n{r}" for i, r in enumerate(responses)])
-    messages = [
-      {
-        "role": "system",
-        "content": "You are an impartial judge. Carefully evaluate each candidate response based on completeness, accuracy, clarity, and relevance to the prompt. Vote for the best one by outputting ONLY the candidate number (e.g., 3). Do not explain.",
-      },
-      {"role": "user", "content": f"Prompt: {main_prompt}\n\n{combined}\n\nVote for the best candidate (1 to {n}):"},
-    ]
-    vote_str = grok_chat(messages, model=model)
-    try:
-      vote = int(vote_str.strip()) - 1
-      if 0 <= vote < n:
-        votes[vote] += 1
-    except ValueError:
-      print(f"Invalid vote: {vote_str}. Skipping.")
-
-  # Select winner (highest votes; in case of tie, pick first)
-  max_votes = max(votes)
-  winner_index = votes.index(max_votes)
-  print(f"Votes: {votes}")
-  print(f"Winner: Candidate {winner_index + 1} with {max_votes} votes")
-  return responses[winner_index]
+def finalize_output(voted_response, main_prompt, model):
+  """Send voted output to Grok for final polishing"""
+  messages = [
+    {
+      "role": "system",
+      "content": "You are a final editor. Take the voted aspects and combine them into a single, coherent, comprehensive response. Ensure it flows naturally, addresses the original prompt fully, and maintains high quality.",
+    },
+    {"role": "user", "content": f"Original prompt: {main_prompt}\n\nVoted aspects:\n{voted_response}"},
+  ]
+  return grok_chat(messages, model=model)
 
 
 def main():
-
-  # Get API key from environment
-  XAI_API_KEY = os.getenv("XAI_API_KEY")
-  if not XAI_API_KEY:
-    raise ValueError("XAI_API_KEY not set in environment")
 
   TEST = os.getenv("TEST", "false").lower() == "true"
 
@@ -93,6 +87,7 @@ def main():
   # Generate filename with date-time
   now = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
   output_path = f"output/heavy_{now}.md"
+  debug_path = f"output/heavy_{now}.debug"
 
   # Read prompt from prompt.md
   if not os.path.exists("prompt.md"):
@@ -113,13 +108,27 @@ def main():
     response = run_agent(main_prompt, i, MODEL)
     responses.append(response)
 
-  print("Voting on responses...")
-  final_output = select_by_voting(responses, main_prompt, model=MODEL, num_voters=num_agents)
+  # Save raw responses for debugging as md with divider to debug_path
+  with open(debug_path, "w") as f:
+    for i, response in enumerate(responses):
+      f.write(f"### Response {i + 1}\n\n{response}\n\n-----------------------------------------------\n\n")
+
+  print("Voting on aspects...")
+  voted_output = vote_on_aspects(responses, main_prompt, MODEL)
+
+  # save voted output to debug_path
+  with open(debug_path, "a") as f:
+    f.write("### Voted Output\n\n")
+    f.write(voted_output + "\n\n-----------------------------------------------\n\n")
+
+  print("Finalizing output...")
+  final_output = finalize_output(voted_output, main_prompt, MODEL)
 
   with open(output_path, "w") as f:
     f.write(final_output)
 
   print(f"Final output saved to: {output_path}")
+  print(f"Debug info saved to: {debug_path}")
 
 
 if __name__ == "__main__":
